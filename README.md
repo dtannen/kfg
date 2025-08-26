@@ -1,0 +1,108 @@
+# kfg - Keep Fucking Going!
+
+A terminal utility that lets you inject "keep fucking going!" commands into any terminal window from anywhere in the system.
+
+## How it works
+
+1. Start `kfg` - it shows you a list of terminal windows to choose from
+2. Select a terminal window - `kfg` runs as a daemon and listens for requests
+3. Any process can send a request to trigger the command injection
+4. When triggered, `kfg` reads your last Claude response and:
+   - If Claude responded "Y": sends "enter" + "keep fucking going!" + "enter" sequence
+   - If Claude responded "N": does nothing
+   - Otherwise: asks "Is there anything you can continue working on? (Y/N)"
+
+## Installation
+
+```bash
+./install.sh
+```
+
+This installs `kfg` to `/usr/local/bin/` so you can run it from anywhere.
+
+## Usage
+
+### Start the daemon
+```bash
+kfg
+```
+- Lists all terminal windows
+- Select one by number
+- Daemon starts and listens for triggers
+
+### Send triggers
+```bash
+kfg trigger          # Send trigger to daemon
+./kfg-client         # Alternative client script
+```
+
+### Read terminal output
+```bash
+kfg last-line        # Get the last line from selected terminal
+```
+
+### Claude Integration
+```bash
+kfg add             # Add kfg hook to Claude settings
+```
+
+**Note**: For Claude to access all tools properly, run Claude with `--dangerously-skip-permissions` flag.
+
+### Management
+```bash
+kfg status          # Check if daemon is running
+kfg stop            # Stop the daemon
+kfg help            # Show help
+```
+
+## Use cases
+
+- **Claude Integration**: `kfg add` sets up automatic triggering when Claude stops tasks
+- **Motivation injection**: `curl -X POST http://your-server/webhook` → triggers kfg
+- **Build monitoring**: add `kfg trigger` to your error handling
+- **Test automation**: integrate with test runners for failures
+- **Terminal monitoring**: use `kfg last-line` to read command output
+- **CI/CD integration**: check terminal results with `kfg last-line`
+- **Debugging**: monitor terminal output from scripts
+
+## Files created
+
+- `~/.kfg_socket` - Unix domain socket for communication
+- `~/.kfg_pid` - PID file for daemon management
+- `~/.kfg_state` - Stores selected terminal window index
+
+## Requirements
+
+- macOS with Terminal.app
+- Python 3.6+
+
+## Technical details
+
+- Uses AppleScript to control Terminal.app windows
+- Unix domain socket for fast local IPC
+- Daemon process with proper cleanup
+- Signal handling for graceful shutdown
+
+## License
+
+MIT License
+
+Copyright (c) 2024
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

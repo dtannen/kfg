@@ -1,0 +1,542 @@
+#!/usr/bin/env python3
+"""
+kfg - Keep Fucking Going utility
+Terminal window manager with socket-based command injection
+"""
+
+import sys
+import os
+import socket
+import subprocess
+import json
+import time
+import signal
+import tempfile
+import glob
+from pathlib import Path
+
+
+SOCKET_PATH = os.path.expanduser("~/.kfg_socket")
+PID_FILE = os.path.expanduser("~/.kfg_pid")
+
+
+def get_terminal_windows():
+    """Get list of Terminal windows using AppleScript"""
+    try:
+        result = subprocess.run([
+            'osascript', '-e', 
+            'tell application "Terminal" to get name of every window'
+        ], capture_output=True, text=True, check=True)
+        
+        windows = result.stdout.strip().split(', ')
+        return [w.strip() for w in windows if w.strip()]
+    except subprocess.CalledProcessError:
+        print("Error: Could not get Terminal windows. Is Terminal.app running?")
+        return []
+
+
+def select_terminal_window(windows):
+    """Display menu for terminal window selection"""
+    if not windows:
+        print("No terminal windows found!")
+        return None
+    
+    print("\nAvailable terminal windows:")
+    for i, window in enumerate(windows, 1):
+        print(f"{i:2d}. {window}")
+    
+    while True:
+        try:
+            choice = input(f"\nSelect terminal window (1-{len(windows)}): ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(windows):
+                return idx
+            else:
+                print(f"Please enter a number between 1 and {len(windows)}")
+        except (ValueError, KeyboardInterrupt):
+            print("\nExiting...")
+            return None
+
+
+def send_to_terminal(window_index, command):
+    """Send command to specific terminal window using AppleScript"""
+    try:
+        if command == "":
+            # Send enter key using keystroke
+            applescript = f'''
+            tell application "Terminal"
+                activate
+                set targetWindow to window {window_index + 1}
+                set frontmost of targetWindow to true
+                tell application "System Events"
+                    keystroke return
+                end tell
+            end tell
+            '''
+        else:
+            # Send regular command
+            applescript = f'''
+            tell application "Terminal"
+                activate
+                set targetWindow to window {window_index + 1}
+                set frontmost of targetWindow to true
+                do script "{command}" in targetWindow
+            end tell
+            '''
+        
+        subprocess.run(['osascript', '-e', applescript], check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error sending command to terminal: {e}")
+        return False
+
+
+def get_terminal_last_line(window_index):
+    """Get the entire terminal output from specific terminal window using AppleScript"""
+    try:
+        applescript = f'''
+        tell application "Terminal"
+            set targetWindow to window {window_index + 1}
+            set windowHistory to history of targetWindow
+            return windowHistory
+        end tell
+        '''
+        
+        result = subprocess.run(['osascript', '-e', applescript], 
+                              capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error reading from terminal: {e}")
+        return None
+
+
+def get_last_claude_response(project_dir=None):
+    """Get the last Claude response from the project files"""
+    try:
+        # Use provided project directory or construct from current working directory
+        if project_dir is None:
+            cwd = os.getcwd()
+            project_name = cwd.replace('/', '-')
+            claude_project_dir = os.path.expanduser(f"~/.claude/projects/{project_name}")
+        else:
+            # Convert raw project directory to Claude projects format
+            project_name = project_dir.replace('/', '-')
+            claude_project_dir = os.path.expanduser(f"~/.claude/projects/{project_name}")
+        
+        if not os.path.exists(claude_project_dir):
+            print(f"Claude project directory not found: {claude_project_dir}")
+            return None
+        
+        # Find the most recent JSONL file
+        jsonl_files = glob.glob(os.path.join(claude_project_dir, "*.jsonl"))
+        if not jsonl_files:
+            print("No conversation files found in Claude project directory")
+            return None
+        
+        # Get the most recently modified file
+        latest_file = max(jsonl_files, key=os.path.getmtime)
+        print(f"Reading from: {latest_file}")
+        
+        # Read the file and find the last assistant message
+        last_assistant_response = None
+        try:
+            with open(latest_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            data = json.loads(line.strip())
+                            if (data.get('type') == 'assistant' and 
+                                'message' in data and 
+                                'content' in data['message']):
+                                
+                                # Extract text content from the message
+                                content = data['message']['content']
+                                if isinstance(content, list):
+                                    # Find text content in the array
+                                    for item in content:
+                                        if isinstance(item, dict) and item.get('type') == 'text':
+                                            last_assistant_response = item.get('text', '')
+                                            break
+                                else:
+                                    last_assistant_response = content
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            print(f"Error reading Claude project file: {e}")
+            return None
+        
+        return last_assistant_response
+        
+    except Exception as e:
+        print(f"Error getting last Claude response: {e}")
+        return None
+
+
+
+def get_current_window_index():
+    """Get the currently selected terminal window index from stored state"""
+    try:
+        state_file = os.path.expanduser("~/.kfg_state")
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                data = json.load(f)
+                return data.get('window_index')
+    except:
+        pass
+    return None
+
+
+def save_current_window_index(window_index):
+    """Save the currently selected terminal window index"""
+    try:
+        state_file = os.path.expanduser("~/.kfg_state")
+        with open(state_file, 'w') as f:
+            json.dump({'window_index': window_index}, f)
+    except:
+        pass
+
+
+def add_claude_hook():
+    """Add kfg trigger hook to Claude settings"""
+    # Look for .claude directory in current working directory
+    claude_dir = ".claude"
+    if not os.path.exists(claude_dir):
+        print("No .claude directory found in current directory")
+        return False
+    
+    # Check for settings.local.json first, then settings.json
+    settings_files = ["settings.local.json", "settings.json"]
+    settings_path = None
+    
+    for filename in settings_files:
+        path = os.path.join(claude_dir, filename)
+        if os.path.exists(path):
+            settings_path = path
+            break
+    
+    if not settings_path:
+        # Create settings.local.json if neither exists
+        settings_path = os.path.join(claude_dir, "settings.local.json")
+        settings_data = {
+            "$schema": "https://json.schemastore.org/claude-code-settings.json",
+            "hooks": {}
+        }
+    else:
+        # Load existing settings
+        try:
+            with open(settings_path, 'r') as f:
+                settings_data = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error reading {settings_path}: {e}")
+            return False
+    
+    # Ensure hooks section exists
+    if "hooks" not in settings_data:
+        settings_data["hooks"] = {}
+    
+    # Ensure Stop hooks section exists
+    if "Stop" not in settings_data["hooks"]:
+        settings_data["hooks"]["Stop"] = []
+    
+    # Check if kfg hook already exists
+    kfg_hook = {
+        "type": "command",
+        "command": "kfg trigger"
+    }
+    
+    for hook_entry in settings_data["hooks"]["Stop"]:
+        if "hooks" in hook_entry:
+            for hook in hook_entry["hooks"]:
+                if hook.get("command") == "kfg trigger":
+                    print("kfg trigger hook already exists in Claude settings")
+                    return True
+    
+    # Add the kfg hook
+    kfg_hook_entry = {
+        "matcher": "*",
+        "hooks": [kfg_hook]
+    }
+    
+    settings_data["hooks"]["Stop"].append(kfg_hook_entry)
+    
+    # Write back to file
+    try:
+        with open(settings_path, 'w') as f:
+            json.dump(settings_data, f, indent=2)
+        
+        print(f"✅ Added kfg trigger hook to {settings_path}")
+        print("Claude will now trigger kfg when stopping tasks")
+        return True
+        
+    except IOError as e:
+        print(f"Error writing to {settings_path}: {e}")
+        return False
+
+
+def cleanup():
+    """Clean up socket and PID files"""
+    try:
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+        if os.path.exists(PID_FILE):
+            os.unlink(PID_FILE)
+        state_file = os.path.expanduser("~/.kfg_state")
+        if os.path.exists(state_file):
+            os.unlink(state_file)
+    except OSError:
+        pass
+
+
+def signal_handler(signum, frame):
+    """Handle termination signals"""
+    print(f"\nReceived signal {signum}, cleaning up...")
+    cleanup()
+    sys.exit(0)
+
+
+def is_daemon_running():
+    """Check if kfg daemon is already running"""
+    if not os.path.exists(PID_FILE):
+        return False
+    
+    try:
+        with open(PID_FILE, 'r') as f:
+            pid = int(f.read().strip())
+        
+        # Check if process is still running
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        # PID file exists but process is dead
+        cleanup()
+        return False
+
+
+def start_daemon(window_index):
+    """Start the socket server daemon"""
+    # Set up signal handlers
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Clean up any existing socket
+    cleanup()
+    
+    # Save window index for later use
+    save_current_window_index(window_index)
+    
+    # Write PID file
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    # Create Unix domain socket
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(SOCKET_PATH)
+    sock.listen(5)
+    
+    print(f"kfg daemon started (PID: {os.getpid()})")
+    print(f"Listening on {SOCKET_PATH}")
+    print("Send requests to trigger 'keep fucking going!' in terminal")
+    print("Press Ctrl+C to stop\n")
+    
+    try:
+        while True:
+            conn, addr = sock.accept()
+            try:
+                data = conn.recv(1024).decode('utf-8').strip()
+                if data:
+                    print(f"Received trigger request: {data}")
+                    
+                    # Parse project directory from trigger message
+                    project_dir = None
+                    if data.startswith('trigger:'):
+                        project_dir = data.split(':', 1)[1]
+                        print(f"Using project directory: {project_dir}")
+                    
+                    # Get the last Claude response from project files
+                    last_claude_response = get_last_claude_response(project_dir)
+                    if last_claude_response is None:
+                        last_claude_response = ""
+                    
+                    print(f"Last Claude response: {last_claude_response}")
+                    
+                    # Check response and decide action
+                    if last_claude_response and "N" in last_claude_response:
+                        # Claude said No - do nothing
+                        print("Claude responded with 'N' - doing nothing")
+                        conn.send(b"NO_ACTION\n")
+                    elif last_claude_response and "Y" in last_claude_response:
+                        # Claude said Yes - execute "keep fucking going!" sequence
+                        print("Claude responded with 'Y' - executing 'keep fucking going!' sequence")
+                        
+                        # Initial delay to let terminal activate
+                        time.sleep(0.8)
+                        
+                        # Send enter key first
+                        send_to_terminal(window_index, "")
+                        time.sleep(0.4)
+                        
+                        # Send "keep fucking going!"
+                        send_to_terminal(window_index, "keep fucking going!")
+                        time.sleep(0.4)
+                        
+                        # Send final enter
+                        send_to_terminal(window_index, "")
+                        time.sleep(0.5)
+                        
+                        # Reselect terminal and send another enter
+                        send_to_terminal(window_index, "")
+                        
+                        conn.send(b"KEEP_GOING\n")
+                        print("Sent 'keep fucking going!' to terminal")
+                    else:
+                        # No clear Y/N found - ask politely
+                        print("No clear Y/N response found - asking politely")
+                        
+                        # Initial delay to let terminal activate
+                        time.sleep(0.8)
+                        
+                        # Send enter key first
+                        send_to_terminal(window_index, "")
+                        time.sleep(0.4)
+                        
+                        # Send polite question
+                        send_to_terminal(window_index, "Is there anything you can continue working on? (Y/N)")
+                        time.sleep(0.4)
+                        
+                        # Send final enter
+                        send_to_terminal(window_index, "")
+                        time.sleep(0.5)
+                        
+                        # Reselect terminal and send another enter
+                        send_to_terminal(window_index, "")
+                        
+                        conn.send(b"ASKED_POLITELY\n")
+                        print("Asked Claude politely to continue")
+            except Exception as e:
+                print(f"Error handling request: {e}")
+            finally:
+                conn.close()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sock.close()
+        cleanup()
+        print("kfg daemon stopped")
+
+
+def send_trigger(project_dir=None):
+    """Send trigger to running daemon"""
+    if not is_daemon_running():
+        print("kfg daemon is not running. Start it first with 'kfg'")
+        return False
+    
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(SOCKET_PATH)
+        
+        # Send trigger with optional project directory
+        message = "trigger"
+        if project_dir:
+            message = f"trigger:{project_dir}"
+        
+        sock.send(f"{message}\n".encode())
+        response = sock.recv(1024).decode('utf-8').strip()
+        sock.close()
+        
+        print(f"Trigger sent: {response}")
+        return True
+    except Exception as e:
+        print(f"Error sending trigger: {e}")
+        return False
+
+
+def stop_daemon():
+    """Stop running daemon"""
+    if not is_daemon_running():
+        print("kfg daemon is not running")
+        return
+    
+    try:
+        with open(PID_FILE, 'r') as f:
+            pid = int(f.read().strip())
+        
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(1)
+        
+        if not is_daemon_running():
+            print("kfg daemon stopped")
+        else:
+            print("Failed to stop daemon")
+    except Exception as e:
+        print(f"Error stopping daemon: {e}")
+
+
+def show_status():
+    """Show daemon status"""
+    if is_daemon_running():
+        with open(PID_FILE, 'r') as f:
+            pid = f.read().strip()
+        print(f"kfg daemon is running (PID: {pid})")
+        print(f"Socket: {SOCKET_PATH}")
+    else:
+        print("kfg daemon is not running")
+
+
+def main():
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        
+        if cmd == "trigger":
+            # Check if CLAUDE_PROJECT_DIR is available from the hook
+            project_dir = os.environ.get('CLAUDE_PROJECT_DIR')
+            print(f"Project directory: {project_dir}")
+            send_trigger(project_dir)
+        elif cmd == "stop":
+            stop_daemon()
+        elif cmd == "status":
+            show_status()
+        elif cmd == "last-line":
+            # Get the last Claude response from project files
+            last_response = get_last_claude_response()
+            if last_response is not None:
+                print(last_response)
+            else:
+                print("Error: Could not read Claude response from project files")
+        elif cmd == "add":
+            add_claude_hook()
+        elif cmd == "help":
+            print("Usage:")
+            print("  kfg           - Start daemon with terminal selection")
+            print("  kfg trigger   - Send trigger to running daemon")
+            print("  kfg last-line - Get last line from selected terminal")
+            print("  kfg add       - Add kfg hook to Claude settings")
+            print("  kfg stop      - Stop running daemon")
+            print("  kfg status    - Show daemon status")
+            print("  kfg help      - Show this help")
+        else:
+            print(f"Unknown command: {cmd}")
+            print("Run 'kfg help' for usage information")
+        return
+    
+    # Main flow - start daemon
+    if is_daemon_running():
+        print("kfg daemon is already running")
+        print("Use 'kfg trigger' to send trigger or 'kfg stop' to stop")
+        return
+    
+    windows = get_terminal_windows()
+    if not windows:
+        return
+    
+    selected_idx = select_terminal_window(windows)
+    if selected_idx is None:
+        return
+    
+    print(f"\nSelected: {windows[selected_idx]}")
+    print("Starting daemon...")
+    
+    start_daemon(selected_idx)
+
+
+if __name__ == "__main__":
+    main()
