@@ -1,13 +1,13 @@
 # kfg - Keep Fucking Going!
 
-A terminal utility that lets you inject "keep fucking going!" commands into any terminal window from anywhere in the system.
+A terminal utility that automatically continues Claude Code sessions when Claude stops working on tasks.
 
 ## How it works
 
-1. Start `kfg` - it shows you a list of terminal windows to choose from
-2. Select a terminal window - `kfg` runs as a daemon and listens for requests
-3. Any process can send a request to trigger the command injection
-4. When triggered, `kfg` reads your last Claude response and:
+1. In your Claude Code project directory, run `kfg add` to set up the hook
+2. Start `kfg` - it shows you a list of terminal windows to choose from
+3. Select your Claude Code terminal window - `kfg` runs as a daemon and listens for hook triggers
+4. When triggered by the Claude Code hook, `kfg` reads your last Claude response and:
    - If Claude responded "Y": sends "enter" + "keep fucking going!" + "enter" sequence
    - If Claude responded "N": does nothing
    - Otherwise: asks "Is there anything you can continue working on? (Y/N)"
