@@ -57,13 +57,9 @@ kfg help            # Show help
 
 ## Use cases
 
-- **Claude Integration**: `kfg add` sets up automatic triggering when Claude stops tasks
-- **Motivation injection**: `curl -X POST http://your-server/webhook` → triggers kfg
-- **Build monitoring**: add `kfg trigger` to your error handling
-- **Test automation**: integrate with test runners for failures
-- **Terminal monitoring**: use `kfg last-line` to read command output
-- **CI/CD integration**: check terminal results with `kfg last-line`
-- **Debugging**: monitor terminal output from scripts
+- **Primary use case**: Automatically continue Claude Code sessions when Claude stops working on multi-step tasks
+- **Manual triggering**: Use `kfg trigger` to manually prompt Claude to continue
+- **Terminal monitoring**: Use `kfg last-line` to check Claude's last response
 
 ## Files created
 
