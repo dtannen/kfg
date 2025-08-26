@@ -48,6 +48,14 @@ kfg add             # Add kfg hook to Claude settings
 
 **Note**: For Claude to access all tools properly, run Claude with `--dangerously-skip-permissions` flag.
 
+### Configuration
+```bash
+kfg config                           # Show current configuration
+kfg config set continue_phrase "go!" # Set custom continue phrase
+kfg config set polite_question "Continue?" # Set custom question
+kfg config set delays.initial 1.0   # Set initial delay in seconds
+```
+
 ### Management
 ```bash
 kfg status          # Check if daemon is running
@@ -66,6 +74,7 @@ kfg help            # Show help
 - `~/.kfg_socket` - Unix domain socket for communication
 - `~/.kfg_pid` - PID file for daemon management
 - `~/.kfg_state` - Stores selected terminal window index
+- `~/.kfg_config.json` - Configuration file for custom phrases and delays
 
 ## Requirements
 
@@ -78,6 +87,9 @@ kfg help            # Show help
 - Unix domain socket for fast local IPC
 - Daemon process with proper cleanup
 - Signal handling for graceful shutdown
+- Configurable phrases and timing delays
+- Improved Y/N response detection with regex patterns
+- Better error handling and input validation
 
 ## License
 

@@ -13,11 +13,51 @@ import time
 import signal
 import tempfile
 import glob
+import re
 from pathlib import Path
 
 
 SOCKET_PATH = os.path.expanduser("~/.kfg_socket")
 PID_FILE = os.path.expanduser("~/.kfg_pid")
+CONFIG_FILE = os.path.expanduser("~/.kfg_config.json")
+
+# Default configuration
+DEFAULT_CONFIG = {
+    "continue_phrase": "keep fucking going!",
+    "polite_question": "Is there anything you can continue working on? (Y/N)",
+    "delays": {
+        "initial": 0.8,
+        "between_commands": 0.4,
+        "final": 0.5
+    }
+}
+
+
+def load_config():
+    """Load configuration from file or return defaults"""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                # Merge with defaults to ensure all keys exist
+                merged_config = DEFAULT_CONFIG.copy()
+                merged_config.update(config)
+                return merged_config
+    except Exception as e:
+        print(f"Error loading config: {e}, using defaults")
+    
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(config):
+    """Save configuration to file"""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}")
+        return False
 
 
 def get_terminal_windows():
@@ -128,47 +168,68 @@ def get_last_claude_response(project_dir=None):
             return None
         
         # Find the most recent JSONL file
-        jsonl_files = glob.glob(os.path.join(claude_project_dir, "*.jsonl"))
+        try:
+            jsonl_files = glob.glob(os.path.join(claude_project_dir, "*.jsonl"))
+        except Exception as e:
+            print(f"Error finding JSONL files: {e}")
+            return None
+            
         if not jsonl_files:
             print("No conversation files found in Claude project directory")
             return None
         
         # Get the most recently modified file
-        latest_file = max(jsonl_files, key=os.path.getmtime)
-        print(f"Reading from: {latest_file}")
+        try:
+            latest_file = max(jsonl_files, key=os.path.getmtime)
+            print(f"Reading from: {latest_file}")
+        except Exception as e:
+            print(f"Error finding latest file: {e}")
+            return None
         
         # Read the file and find the last assistant message
         last_assistant_response = None
         try:
             with open(latest_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if line.strip():
-                        try:
-                            data = json.loads(line.strip())
-                            if (data.get('type') == 'assistant' and 
-                                'message' in data and 
-                                'content' in data['message']):
-                                
-                                # Extract text content from the message
-                                content = data['message']['content']
-                                if isinstance(content, list):
-                                    # Find text content in the array
-                                    for item in content:
-                                        if isinstance(item, dict) and item.get('type') == 'text':
-                                            last_assistant_response = item.get('text', '')
-                                            break
-                                else:
-                                    last_assistant_response = content
-                        except json.JSONDecodeError:
-                            continue
-        except Exception as e:
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    try:
+                        data = json.loads(line)
+                        if (data.get('type') == 'assistant' and 
+                            'message' in data and 
+                            'content' in data['message']):
+                            
+                            # Extract text content from the message
+                            content = data['message']['content']
+                            if isinstance(content, list):
+                                # Find text content in the array
+                                for item in content:
+                                    if isinstance(item, dict) and item.get('type') == 'text':
+                                        text_content = item.get('text', '')
+                                        if text_content.strip():
+                                            last_assistant_response = text_content
+                                        break
+                            elif isinstance(content, str) and content.strip():
+                                last_assistant_response = content
+                    except json.JSONDecodeError as e:
+                        # Skip malformed JSON lines
+                        continue
+                    except KeyError:
+                        # Skip lines with unexpected structure
+                        continue
+        except IOError as e:
             print(f"Error reading Claude project file: {e}")
+            return None
+        except UnicodeDecodeError as e:
+            print(f"Error decoding Claude project file: {e}")
             return None
         
         return last_assistant_response
         
     except Exception as e:
-        print(f"Error getting last Claude response: {e}")
+        print(f"Unexpected error getting last Claude response: {e}")
         return None
 
 
@@ -314,6 +375,9 @@ def is_daemon_running():
 
 def start_daemon(window_index):
     """Start the socket server daemon"""
+    # Load configuration
+    config = load_config()
+    
     # Set up signal handlers
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -357,55 +421,82 @@ def start_daemon(window_index):
                     if last_claude_response is None:
                         last_claude_response = ""
                     
-                    print(f"Last Claude response: {last_claude_response}")
+                    # Show truncated response for debugging
+                    if last_claude_response:
+                        debug_response = last_claude_response.replace('\n', ' ').strip()
+                        if len(debug_response) > 100:
+                            debug_response = debug_response[:100] + "..."
+                        print(f"Last Claude response: '{debug_response}'")
+                    else:
+                        print("Last Claude response: (empty or not found)")
                     
-                    # Check response and decide action
-                    if last_claude_response and "N" in last_claude_response:
+                    # Check response and decide action with improved Y/N detection
+                    response_lower = last_claude_response.lower() if last_claude_response else ""
+                    
+                    # Look for clear Y or N responses (standalone or at word boundaries)
+                    
+                    # Check for standalone Y, Yes, N, No at the beginning or as separate words
+                    y_pattern = r'\b(y|yes)\b'
+                    n_pattern = r'\b(n|no)\b'
+                    
+                    has_y = bool(re.search(y_pattern, response_lower))
+                    has_n = bool(re.search(n_pattern, response_lower))
+                    
+                    # Special case: if response is just "Y" or just "N", prioritize that
+                    trimmed_response = response_lower.strip()
+                    if trimmed_response in ['y', 'yes']:
+                        has_y = True
+                        has_n = False
+                    elif trimmed_response in ['n', 'no']:
+                        has_n = True
+                        has_y = False
+                    
+                    if has_n and not has_y:
                         # Claude said No - do nothing
-                        print("Claude responded with 'N' - doing nothing")
+                        print("Claude responded with 'N/No' - doing nothing")
                         conn.send(b"NO_ACTION\n")
-                    elif last_claude_response and "Y" in last_claude_response:
+                    elif has_y and not has_n:
                         # Claude said Yes - execute "keep fucking going!" sequence
-                        print("Claude responded with 'Y' - executing 'keep fucking going!' sequence")
+                        print("Claude responded with 'Y/Yes' - executing 'keep fucking going!' sequence")
                         
                         # Initial delay to let terminal activate
-                        time.sleep(0.8)
+                        time.sleep(config["delays"]["initial"])
                         
                         # Send enter key first
                         send_to_terminal(window_index, "")
-                        time.sleep(0.4)
+                        time.sleep(config["delays"]["between_commands"])
                         
-                        # Send "keep fucking going!"
-                        send_to_terminal(window_index, "keep fucking going!")
-                        time.sleep(0.4)
+                        # Send configured continue phrase
+                        send_to_terminal(window_index, config["continue_phrase"])
+                        time.sleep(config["delays"]["between_commands"])
                         
                         # Send final enter
                         send_to_terminal(window_index, "")
-                        time.sleep(0.5)
+                        time.sleep(config["delays"]["final"])
                         
                         # Reselect terminal and send another enter
                         send_to_terminal(window_index, "")
                         
                         conn.send(b"KEEP_GOING\n")
-                        print("Sent 'keep fucking going!' to terminal")
+                        print(f"Sent '{config['continue_phrase']}' to terminal")
                     else:
                         # No clear Y/N found - ask politely
                         print("No clear Y/N response found - asking politely")
                         
                         # Initial delay to let terminal activate
-                        time.sleep(0.8)
+                        time.sleep(config["delays"]["initial"])
                         
                         # Send enter key first
                         send_to_terminal(window_index, "")
-                        time.sleep(0.4)
+                        time.sleep(config["delays"]["between_commands"])
                         
-                        # Send polite question
-                        send_to_terminal(window_index, "Is there anything you can continue working on? (Y/N)")
-                        time.sleep(0.4)
+                        # Send configured polite question
+                        send_to_terminal(window_index, config["polite_question"])
+                        time.sleep(config["delays"]["between_commands"])
                         
                         # Send final enter
                         send_to_terminal(window_index, "")
-                        time.sleep(0.5)
+                        time.sleep(config["delays"]["final"])
                         
                         # Reselect terminal and send another enter
                         send_to_terminal(window_index, "")
@@ -504,12 +595,47 @@ def main():
                 print("Error: Could not read Claude response from project files")
         elif cmd == "add":
             add_claude_hook()
+        elif cmd == "config":
+            config = load_config()
+            if len(sys.argv) == 2:
+                # Show current config
+                print("Current configuration:")
+                print(json.dumps(config, indent=2))
+            elif len(sys.argv) >= 5 and sys.argv[2] == "set":
+                # Set a config value: kfg config set continue_phrase "keep going!"
+                key = sys.argv[3]
+                value = sys.argv[4]
+                
+                # Parse dotted keys like delays.initial
+                keys = key.split('.')
+                target = config
+                for k in keys[:-1]:
+                    if k not in target:
+                        target[k] = {}
+                    target = target[k]
+                
+                # Try to parse as number, boolean, or keep as string
+                if value.lower() in ['true', 'false']:
+                    value = value.lower() == 'true'
+                elif value.replace('.', '').isdigit():
+                    value = float(value) if '.' in value else int(value)
+                
+                target[keys[-1]] = value
+                
+                if save_config(config):
+                    print(f"Set {key} = {value}")
+                else:
+                    print("Failed to save configuration")
+            else:
+                print("Usage: kfg config [set key value]")
         elif cmd == "help":
             print("Usage:")
             print("  kfg           - Start daemon with terminal selection")
             print("  kfg trigger   - Send trigger to running daemon")
             print("  kfg last-line - Get last line from selected terminal")
             print("  kfg add       - Add kfg hook to Claude settings")
+            print("  kfg config    - Show current configuration")
+            print("  kfg config set key value - Set configuration value")
             print("  kfg stop      - Stop running daemon")
             print("  kfg status    - Show daemon status")
             print("  kfg help      - Show this help")
